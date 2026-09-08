@@ -1,0 +1,13 @@
+# Runtime-generated, not part of the source
+__pycache__/
+*.pyc
+vendor_cache.json
+theme_pref.json
+
+# Build artifacts (rebuilt via installer\build.bat)
+installer/dist/
+installer/build/
+installer/Output/
+
+# Local Claude Code settings (personal permission allowlist, not project config)
+.claude/
