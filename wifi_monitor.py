@@ -5,13 +5,19 @@ Simple GUI tool that live-polls the currently connected WiFi interface and
 displays the access point's BSSID (MAC address), SSID, and signal strength.
 
 How it works:
-- Repeatedly runs `netsh wlan show interfaces` (built into Windows).
-- Parses the SSID, BSSID, signal percentage, radio type, and channel from
-  its output.
-- Converts signal percentage to an approximate dBm value for reference.
+- Windows: repeatedly runs `netsh wlan show interfaces` and parses the
+  SSID, BSSID, signal percentage, radio type, and channel from its output.
+- macOS: repeatedly runs `system_profiler SPAirPortDataType` (there's no
+  netsh equivalent) and parses the same fields from its "Current Network
+  Information" section - except BSSID, which recent macOS simply doesn't
+  expose through this command (Apple's own privacy restriction, not a gap
+  in this tool); that field just stays blank there.
+- Converts signal percentage to an approximate dBm value for reference on
+  Windows (macOS reports dBm directly, so it's converted the other way for
+  the signal-strength bar).
 
 Uses the vendored customtkinter package in vendor/ for its UI, plus the
-rest of the Python standard library (Windows only).
+rest of the Python standard library.
 """
 
 import re
@@ -20,9 +26,9 @@ import threading
 import time
 import queue
 
-from pandora_theme import ctk, palette, font, set_window_icon
+from pandora_theme import ctk, palette, font, set_window_icon, IS_MAC, SUBPROCESS_FLAGS
 
-POLL_SECONDS = 1.0
+POLL_SECONDS = 3.0 if IS_MAC else 1.0  # system_profiler is much slower to shell out to than netsh
 
 FIELD_PATTERNS = {
     "ssid": re.compile(r"^\s*SSID\s*:\s*(.+?)\s*$", re.MULTILINE),
@@ -39,12 +45,13 @@ def signal_percent_to_dbm(percent: int) -> int:
     return (percent // 2) - 100
 
 
-def get_wlan_status() -> dict:
+def dbm_to_signal_percent(dbm: int) -> int:
+    return max(0, min(100, (dbm + 100) * 2))
+
+
+def get_wlan_status_windows() -> dict:
     output = subprocess.run(
-        ["netsh", "wlan", "show", "interfaces"],
-        capture_output=True,
-        text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        ["netsh", "wlan", "show", "interfaces"], capture_output=True, text=True, **SUBPROCESS_FLAGS
     ).stdout
 
     info = {}
@@ -63,6 +70,66 @@ def get_wlan_status() -> dict:
         info["dbm"] = None
 
     return info
+
+
+def get_wlan_status_mac() -> dict:
+    output = subprocess.run(
+        ["system_profiler", "SPAirPortDataType"], capture_output=True, text=True, timeout=10, **SUBPROCESS_FLAGS
+    ).stdout
+
+    info = {"ssid": None, "bssid": None, "signal": None, "rssi": None, "radio": None, "channel": None, "state": None}
+
+    status_match = re.search(r"^\s*Status:\s*(.+?)\s*$", output, re.MULTILINE)
+    if status_match:
+        info["state"] = status_match.group(1)
+
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != "Current Network Information:":
+            continue
+
+        # The next non-blank line is the connected SSID itself, as a bare
+        # "<name>:" key one indent level deeper - everything indented
+        # further than *that* line belongs to this network's details.
+        for j in range(i + 1, len(lines)):
+            if not lines[j].strip():
+                continue
+            ssid_indent = len(lines[j]) - len(lines[j].lstrip(" "))
+            info["ssid"] = lines[j].strip().rstrip(":")
+
+            for sub_line in lines[j + 1:]:
+                if not sub_line.strip():
+                    continue
+                sub_indent = len(sub_line) - len(sub_line.lstrip(" "))
+                if sub_indent <= ssid_indent:
+                    break
+                stripped = sub_line.strip()
+
+                phy_match = re.match(r"PHY Mode:\s*(\S+)", stripped)
+                if phy_match:
+                    info["radio"] = phy_match.group(1)
+                    continue
+                channel_match = re.match(r"Channel:\s*(\d+)", stripped)
+                if channel_match:
+                    info["channel"] = channel_match.group(1)
+                    continue
+                signal_match = re.match(r"Signal\s*/\s*Noise:\s*(-?\d+)\s*dBm", stripped)
+                if signal_match:
+                    info["rssi"] = int(signal_match.group(1))
+            break
+        break
+
+    if info["rssi"] is not None:
+        info["dbm"] = info["rssi"]
+        info["signal"] = dbm_to_signal_percent(info["rssi"])
+    else:
+        info["dbm"] = None
+
+    return info
+
+
+def get_wlan_status() -> dict:
+    return get_wlan_status_mac() if IS_MAC else get_wlan_status_windows()
 
 
 class WifiMonitorApp:

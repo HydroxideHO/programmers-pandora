@@ -25,10 +25,11 @@ import tkinter as tk
 
 from tkinter import messagebox
 import pandora_theme
-from pandora_theme import ctk, font, set_window_icon
+from pandora_theme import ctk, font, set_window_icon, SUBPROCESS_FLAGS
 
 ROOT_DIR = pandora_theme.APP_DIR
 FROZEN = getattr(sys, "frozen", False)
+FROZEN_EXE_SUFFIX = ".exe" if pandora_theme.IS_WINDOWS else ""
 EXCLUDED_FILES = {"pandora_theme.py", "pandora_home.py"}
 
 WINDOW_WIDTH = 960
@@ -98,7 +99,7 @@ def discover_scripts():
 
         launch_path = path
         if FROZEN:
-            exe_path = os.path.join(ROOT_DIR, os.path.splitext(entry)[0] + ".exe")
+            exe_path = os.path.join(ROOT_DIR, os.path.splitext(entry)[0] + FROZEN_EXE_SUFFIX)
             if not os.path.isfile(exe_path):
                 continue
             launch_path = exe_path
@@ -292,11 +293,7 @@ class PandoraHome:
     def launch(self, path: str, title: str):
         command = [path] if FROZEN else [sys.executable, path]
         try:
-            subprocess.Popen(
-                command,
-                cwd=ROOT_DIR,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            subprocess.Popen(command, cwd=ROOT_DIR, **SUBPROCESS_FLAGS)
             self.status_var.set(f"Launched: {title}")
         except OSError as exc:
             messagebox.showerror("Launch failed", f"Could not launch {title}:\n{exc}")

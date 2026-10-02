@@ -12,7 +12,9 @@ How it works:
 - When found, shows the IP in a popup and updates the status label.
 
 Uses the vendored customtkinter package in vendor/ for its UI, plus the
-rest of the Python standard library (no scapy/npcap needed).
+rest of the Python standard library (no scapy/npcap needed). Works on
+Windows and macOS - `ping`/`arp` are both present on each, just with
+different flags and output formats, which this handles per-platform.
 """
 
 import re
@@ -24,7 +26,7 @@ import queue
 from concurrent.futures import ThreadPoolExecutor
 
 from tkinter import messagebox
-from pandora_theme import ctk, palette, font, set_window_icon
+from pandora_theme import ctk, palette, font, set_window_icon, IS_MAC, SUBPROCESS_FLAGS
 
 PING_TIMEOUT_MS = 300
 MAX_WORKERS = 100
@@ -32,6 +34,13 @@ SWEEP_PAUSE_SECONDS = 2
 
 
 def normalize_mac(mac: str) -> str:
+    # Split on separators and re-pad each octet rather than just stripping
+    # punctuation, since macOS's arp -a omits leading zeros on octets (e.g.
+    # "8:0:20:1:2:3") - stripping alone would under-count hex digits and
+    # fail to match against a properly zero-padded target MAC.
+    parts = re.split(r"[:-]", mac.strip())
+    if len(parts) == 6 and all(re.fullmatch(r"[0-9a-fA-F]{1,2}", p) for p in parts):
+        return "".join(p.zfill(2).lower() for p in parts)
     return re.sub(r"[^0-9a-fA-F]", "", mac).lower()
 
 
@@ -50,12 +59,11 @@ def get_local_subnet_prefix() -> str:
 
 
 def ping(ip: str) -> None:
-    subprocess.run(
-        ["ping", "-n", "1", "-w", str(PING_TIMEOUT_MS), ip],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    if IS_MAC:
+        cmd = ["ping", "-c", "1", "-W", str(PING_TIMEOUT_MS), ip]
+    else:
+        cmd = ["ping", "-n", "1", "-w", str(PING_TIMEOUT_MS), ip]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **SUBPROCESS_FLAGS)
 
 
 def sweep_subnet(prefix: str) -> None:
@@ -65,21 +73,23 @@ def sweep_subnet(prefix: str) -> None:
 
 
 def get_arp_table() -> dict:
-    output = subprocess.run(
-        ["arp", "-a"],
-        capture_output=True,
-        text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    ).stdout
+    output = subprocess.run(["arp", "-a"], capture_output=True, text=True, **SUBPROCESS_FLAGS).stdout
 
     mapping = {}
-    ip_re = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$")
-    mac_re = re.compile(r"^([0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}$")
-
-    for line in output.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and ip_re.match(parts[0]) and mac_re.match(parts[1]):
-            mapping[normalize_mac(parts[1])] = parts[0]
+    if IS_MAC:
+        # e.g. "? (192.168.1.1) at ac:de:48:0:11:22 on en0 ifscope [ethernet]"
+        entry_re = re.compile(
+            r"\((\d{1,3}(?:\.\d{1,3}){3})\)\s+at\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})"
+        )
+        for match in entry_re.finditer(output):
+            mapping[normalize_mac(match.group(2))] = match.group(1)
+    else:
+        ip_re = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$")
+        mac_re = re.compile(r"^([0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}$")
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and ip_re.match(parts[0]) and mac_re.match(parts[1]):
+                mapping[normalize_mac(parts[1])] = parts[0]
 
     return mapping
 

@@ -12,7 +12,13 @@ vendor path is guaranteed to be set up first:
     from pandora_theme import ctk, palette, font, set_window_icon
 
 Call `set_window_icon(root)` right after creating each script's root window
-to pick up the app icon from Logo/pandora.ico.
+to pick up the app icon - Logo/pandora.ico on Windows, Logo/pandora_512.png
+on macOS (Tk's .ico support is Windows-only).
+
+Also exposes IS_WINDOWS/IS_MAC and SUBPROCESS_FLAGS (spread into any
+subprocess.run()/Popen() call that shells out to things like ping/arp/netsh,
+since the flag that suppresses a console flash only exists on Windows) so
+each tool script can branch on platform without re-detecting it itself.
 
 Light/dark mode: `palette` points at whichever of light_palette/dark_palette
 matches the saved preference (theme_pref.json) at the time this module is
@@ -23,14 +29,31 @@ the next time they're launched as their own process.
 
 import json
 import os
+import subprocess
 import sys
 import tkinter as tk
 
+IS_WINDOWS = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+
+# subprocess.CREATE_NO_WINDOW only exists on Windows (it suppresses the
+# console flash from shelling out to things like netsh/arp/ping). Spread
+# this into subprocess.run()/Popen() calls instead of passing creationflags
+# directly, so the same call site works on both platforms:
+#     subprocess.run([...], **SUBPROCESS_FLAGS)
+SUBPROCESS_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
+
 # When frozen by PyInstaller, __file__ points inside the temp/bundle extraction
-# dir, not next to the compiled .exe - use sys.executable's folder instead so
-# Logo/, theme_pref.json, etc. resolve to files actually shipped alongside it.
+# dir, not next to the compiled .exe/.app - use sys.executable's folder instead
+# so Logo/, theme_pref.json, etc. resolve to files actually shipped alongside
+# it. On macOS a frozen .app's executable lives in Contents/MacOS/, two levels
+# below Contents/Resources/ where PyInstaller puts bundled data by default -
+# app-relative files are shipped there instead (see the .spec on macOS builds).
 if getattr(sys, "frozen", False):
-    APP_DIR = os.path.dirname(sys.executable)
+    if IS_MAC:
+        APP_DIR = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "Resources"))
+    else:
+        APP_DIR = os.path.dirname(sys.executable)
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -40,21 +63,34 @@ if os.path.isdir(VENDOR_DIR) and VENDOR_DIR not in sys.path:
 
 import customtkinter as ctk  # noqa: E402  (must follow the sys.path insert)
 
-ICON_PATH = os.path.join(APP_DIR, "Logo", "pandora.ico")
+ICON_ICO_PATH = os.path.join(APP_DIR, "Logo", "pandora.ico")
+ICON_PNG_PATH = os.path.join(APP_DIR, "Logo", "pandora_512.png")
 THEME_PREF_FILE = os.path.join(APP_DIR, "theme_pref.json")
 
 
 def set_window_icon(window):
-    if os.path.isfile(ICON_PATH):
+    # Tk's iconbitmap() only understands .ico on Windows (and is a no-op/
+    # error on macOS, which wants a real image via iconphoto() instead).
+    if IS_WINDOWS:
+        if os.path.isfile(ICON_ICO_PATH):
+            try:
+                window.iconbitmap(ICON_ICO_PATH)
+            except tk.TclError:
+                pass
+        return
+
+    if os.path.isfile(ICON_PNG_PATH):
         try:
-            window.iconbitmap(ICON_PATH)
+            photo = tk.PhotoImage(file=ICON_PNG_PATH)
+            window.iconphoto(True, photo)
+            window._icon_photo_ref = photo  # keep a reference - Tk drops the icon if this is garbage collected
         except tk.TclError:
             pass
 
 
 ctk.set_default_color_theme("blue")
 
-FONT_FAMILY = "Segoe UI"
+FONT_FAMILY = "Helvetica Neue" if IS_MAC else "Segoe UI"
 
 
 class light_palette:

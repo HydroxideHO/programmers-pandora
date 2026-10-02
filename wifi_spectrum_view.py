@@ -5,13 +5,20 @@ Live occupancy chart of nearby WiFi networks plotted against frequency, with
 reference channel markers for 2.4 GHz WiFi, 5 GHz WiFi, and Zigbee.
 
 How it works:
-- Before each read, asks Windows to actively rescan via the WLAN API's
-  WlanScan() call (wlanapi.dll) - the same call the WiFi flyout/settings UI
-  triggers when you open it. Without this, `netsh wlan show networks` only
-  reads whatever list Windows already has cached, which can go stale for
-  minutes since background scanning is heavily throttled.
-- Then runs `netsh wlan show networks mode=bssid` (built into Windows) and
-  parses every visible SSID/BSSID's channel and signal strength.
+- Windows: before each read, actively rescans via the WLAN API's WlanScan()
+  call (wlanapi.dll) - the same call the WiFi flyout/settings UI triggers
+  when you open it. Without this, `netsh wlan show networks` only reads
+  whatever list Windows already has cached, which can go stale for minutes
+  since background scanning is heavily throttled. Then runs
+  `netsh wlan show networks mode=bssid` and parses every visible
+  SSID/BSSID's channel and signal strength.
+- macOS: runs the `airport` command-line tool's `-s` scan. This is an
+  undocumented tool Apple ships inside a private framework rather than a
+  supported public API, so it isn't guaranteed to exist or keep working on
+  any given macOS version - if it's missing, this tool says so rather than
+  pretending to have data. Unlike netsh, each `airport -s` call already
+  performs a fresh over-the-air scan itself, so there's no separate
+  "trigger a rescan" step needed the way Windows requires.
 - Plots each network as a bump centered on its channel's center frequency,
   height set by signal percentage, alongside light gridlines marking every
   standard 2.4 GHz or 5 GHz WiFi channel.
@@ -26,11 +33,11 @@ How it works:
   cannot do.
 
 Uses the vendored customtkinter package in vendor/ for its UI, plus the
-rest of the Python standard library (Windows only).
+rest of the Python standard library.
 """
 
 import ctypes
-from ctypes import wintypes
+import os
 import re
 import subprocess
 import threading
@@ -39,7 +46,7 @@ import queue
 
 import tkinter as tk
 
-from pandora_theme import ctk, palette, font, FONT_FAMILY, set_window_icon
+from pandora_theme import ctk, palette, font, FONT_FAMILY, set_window_icon, IS_WINDOWS, IS_MAC, SUBPROCESS_FLAGS
 
 POLL_SECONDS = 3.0
 SCAN_SETTLE_SECONDS = 2.5  # time to let WlanScan() finish before reading results
@@ -94,72 +101,80 @@ def signal_to_dbm(percent: int) -> int:
     return (percent // 2) - 100
 
 
+def dbm_to_signal_percent(dbm: int) -> int:
+    return max(0, min(100, (dbm + 100) * 2))
+
+
 # --- Active scan trigger (Windows WLAN API) -------------------------------
 # netsh only reads whatever network list Windows already has cached; it does
 # not itself request a fresh over-the-air scan. Opening the WiFi flyout or
 # Settings does, by calling WlanScan() - so we call the same API function
 # ourselves rather than relying on the user having that window open.
+#
+# ctypes.WinDLL and ctypes.wintypes only exist on Windows - this whole block
+# is skipped on macOS (its scan_networks_mac() does a fresh scan on every
+# call anyway, so there's nothing to trigger there).
 
-class _GUID(ctypes.Structure):
-    _fields_ = [
-        ("Data1", ctypes.c_ulong),
-        ("Data2", ctypes.c_ushort),
-        ("Data3", ctypes.c_ushort),
-        ("Data4", ctypes.c_ubyte * 8),
-    ]
+if IS_WINDOWS:
+    from ctypes import wintypes
 
+    class _GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", ctypes.c_ulong),
+            ("Data2", ctypes.c_ushort),
+            ("Data3", ctypes.c_ushort),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
 
-class _WLAN_INTERFACE_INFO(ctypes.Structure):
-    _fields_ = [
-        ("InterfaceGuid", _GUID),
-        ("strInterfaceDescription", ctypes.c_wchar * 256),
-        ("isState", ctypes.c_uint),
-    ]
+    class _WLAN_INTERFACE_INFO(ctypes.Structure):
+        _fields_ = [
+            ("InterfaceGuid", _GUID),
+            ("strInterfaceDescription", ctypes.c_wchar * 256),
+            ("isState", ctypes.c_uint),
+        ]
 
+    class _WLAN_INTERFACE_INFO_LIST(ctypes.Structure):
+        _fields_ = [
+            ("dwNumberOfItems", ctypes.c_ulong),
+            ("dwIndex", ctypes.c_ulong),
+            ("InterfaceInfo", _WLAN_INTERFACE_INFO * 1),
+        ]
 
-class _WLAN_INTERFACE_INFO_LIST(ctypes.Structure):
-    _fields_ = [
-        ("dwNumberOfItems", ctypes.c_ulong),
-        ("dwIndex", ctypes.c_ulong),
-        ("InterfaceInfo", _WLAN_INTERFACE_INFO * 1),
-    ]
-
-
-def trigger_active_scan() -> bool:
-    try:
-        wlanapi = ctypes.WinDLL("wlanapi.dll")
-    except OSError:
-        return False
-
-    handle = wintypes.HANDLE()
-    negotiated_version = ctypes.c_ulong()
-    if wlanapi.WlanOpenHandle(2, None, ctypes.byref(negotiated_version), ctypes.byref(handle)) != 0:
-        return False
-
-    try:
-        p_if_list = ctypes.POINTER(_WLAN_INTERFACE_INFO_LIST)()
-        if wlanapi.WlanEnumInterfaces(handle, None, ctypes.byref(p_if_list)) != 0:
-            return False
+    def trigger_active_scan() -> bool:
         try:
-            if_list = p_if_list.contents
-            if if_list.dwNumberOfItems == 0:
+            wlanapi = ctypes.WinDLL("wlanapi.dll")
+        except OSError:
+            return False
+
+        handle = wintypes.HANDLE()
+        negotiated_version = ctypes.c_ulong()
+        if wlanapi.WlanOpenHandle(2, None, ctypes.byref(negotiated_version), ctypes.byref(handle)) != 0:
+            return False
+
+        try:
+            p_if_list = ctypes.POINTER(_WLAN_INTERFACE_INFO_LIST)()
+            if wlanapi.WlanEnumInterfaces(handle, None, ctypes.byref(p_if_list)) != 0:
                 return False
-            guid = if_list.InterfaceInfo[0].InterfaceGuid
-            return wlanapi.WlanScan(handle, ctypes.byref(guid), None, None, None) == 0
+            try:
+                if_list = p_if_list.contents
+                if if_list.dwNumberOfItems == 0:
+                    return False
+                guid = if_list.InterfaceInfo[0].InterfaceGuid
+                return wlanapi.WlanScan(handle, ctypes.byref(guid), None, None, None) == 0
+            finally:
+                wlanapi.WlanFreeMemory(p_if_list)
         finally:
-            wlanapi.WlanFreeMemory(p_if_list)
-    finally:
-        wlanapi.WlanCloseHandle(handle, None)
+            wlanapi.WlanCloseHandle(handle, None)
+else:
+    def trigger_active_scan() -> bool:
+        return True  # macOS's airport -s does a fresh over-the-air scan on every call already
 
 
 # --- Scanning ------------------------------------------------------------
 
-def scan_networks() -> list:
+def scan_networks_windows() -> list:
     output = subprocess.run(
-        ["netsh", "wlan", "show", "networks", "mode=bssid"],
-        capture_output=True,
-        text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        ["netsh", "wlan", "show", "networks", "mode=bssid"], capture_output=True, text=True, **SUBPROCESS_FLAGS
     ).stdout
 
     results = []
@@ -203,6 +218,59 @@ def scan_networks() -> list:
         results.append(current)
 
     return results
+
+
+# Undocumented/private tool Apple ships for WiFi diagnostics - no public,
+# stdlib-reachable API gives a neighbor-network scan on macOS, so this (like
+# many macOS sysadmin tools) relies on it despite the risk that some future
+# macOS version moves or removes it.
+AIRPORT_PATH = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+
+
+def scan_networks_mac() -> list:
+    if not os.path.isfile(AIRPORT_PATH):
+        raise RuntimeError(
+            "WiFi neighbor scanning isn't available on this Mac: the private 'airport' "
+            "utility this relies on wasn't found at its usual path. Recent macOS versions "
+            "have been known to move or remove it."
+        )
+
+    output = subprocess.run(
+        [AIRPORT_PATH, "-s"], capture_output=True, text=True, timeout=15, **SUBPROCESS_FLAGS
+    ).stdout
+
+    # Columns are space-aligned under a header, not delimited - SSIDs can
+    # contain spaces, so parse from the right instead: BSSID/RSSI/CHANNEL
+    # are fixed, unambiguous tokens, and everything before the BSSID is the
+    # SSID (also skips the header line itself, which won't match this).
+    entry_re = re.compile(
+        r"^\s*(.*?)\s*([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(-?\d+)\s+([\d,]+)"
+    )
+
+    results = []
+    for line in output.splitlines():
+        match = entry_re.match(line)
+        if not match:
+            continue
+        ssid, bssid, rssi_text, channel_text = match.groups()
+        try:
+            rssi = int(rssi_text)
+            channel = int(channel_text.split(",")[0])
+        except ValueError:
+            continue
+        results.append({
+            "ssid": ssid.strip() or "(hidden)",
+            "bssid": bssid.lower(),
+            "signal": dbm_to_signal_percent(rssi),
+            "radio": None,  # airport -s doesn't report a PHY-mode label per network
+            "channel": channel,
+        })
+
+    return results
+
+
+def scan_networks() -> list:
+    return scan_networks_mac() if IS_MAC else scan_networks_windows()
 
 
 # --- App -------------------------------------------------------------
@@ -348,10 +416,15 @@ class WifiSpectrumViewApp:
         self.progress_bar.set(0)
 
     def poll_loop(self, stop_event: threading.Event, gui_queue: queue.Queue):
+        # Only Windows needs a settle delay after trigger_active_scan() - on
+        # macOS, scan_networks_mac() already blocks until its own fresh scan
+        # completes, so there's nothing separate to wait on.
+        settle_seconds = SCAN_SETTLE_SECONDS if IS_WINDOWS else 0.0
+
         while not stop_event.is_set():
             scanned = trigger_active_scan()
 
-            for _ in range(int(SCAN_SETTLE_SECONDS * 10)):
+            for _ in range(int(settle_seconds * 10)):
                 if stop_event.is_set():
                     return
                 time.sleep(0.1)
@@ -362,7 +435,7 @@ class WifiSpectrumViewApp:
             except Exception as exc:
                 gui_queue.put(("error", str(exc)))
 
-            remaining = max(0.0, POLL_SECONDS - SCAN_SETTLE_SECONDS)
+            remaining = max(0.0, POLL_SECONDS - settle_seconds)
             for _ in range(int(remaining * 10)):
                 if stop_event.is_set():
                     return

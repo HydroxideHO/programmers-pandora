@@ -6,8 +6,8 @@ you type in) and lists every device that responds, with its IP, MAC,
 hostname, and manufacturer.
 
 How it works:
-- Reads `ipconfig /all` to list your network adapters and their IPv4
-  address/subnet mask.
+- Reads `ipconfig /all` (Windows) or `ifconfig`/`networksetup` (macOS) to
+  list your network adapters and their IPv4 address/subnet mask.
 - Pick an adapter (auto-fills its subnet as CIDR) or type your own CIDR.
 - Pings every host in that subnet to populate the OS ARP cache, then reads
   the ARP table (`arp -a`) to map IP -> MAC for anything that answered.
@@ -29,7 +29,7 @@ How it works:
   the results down to just those.
 
 Uses the vendored customtkinter package in vendor/ for its UI, plus the
-rest of the Python standard library (Windows only).
+rest of the Python standard library. Works on Windows and macOS.
 """
 
 import ipaddress
@@ -49,7 +49,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from pandora_theme import ctk, palette, font, FONT_FAMILY, set_window_icon, APP_DIR
+from pandora_theme import ctk, palette, font, FONT_FAMILY, set_window_icon, APP_DIR, IS_MAC, SUBPROCESS_FLAGS
 
 PING_TIMEOUT_MS = 300
 MAX_WORKERS = 100
@@ -76,16 +76,75 @@ LOCAL_OUI_VENDORS = {
 
 
 def normalize_mac(mac: str) -> str:
-    digits = re.sub(r"[^0-9a-fA-F]", "", mac).lower()
-    return ":".join(digits[i:i + 2] for i in range(0, len(digits), 2)) if len(digits) == 12 else mac
+    # Split on separators and re-pad each octet rather than just stripping
+    # punctuation, since macOS's arp -a omits leading zeros on octets (e.g.
+    # "8:0:20:1:2:3") - stripping alone would misjudge how many hex digits
+    # there are and skip normalizing those.
+    parts = re.split(r"[:-]", mac.strip())
+    if len(parts) == 6 and all(re.fullmatch(r"[0-9a-fA-F]{1,2}", p) for p in parts):
+        return ":".join(p.zfill(2).lower() for p in parts)
+    return mac
 
 
-def get_adapters() -> list:
+def _hex_netmask_to_dotted(hex_mask: str) -> str:
+    value = int(hex_mask, 16)
+    return ".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
+def _mac_hardware_port_names() -> dict:
+    """Maps device names (en0, en1, ...) to their friendly macOS hardware
+    port names (Wi-Fi, Ethernet, ...), the same role Windows' "Ethernet
+    adapter Ethernet"/"Wireless LAN adapter Wi-Fi" headers serve."""
     output = subprocess.run(
-        ["ipconfig", "/all"],
-        capture_output=True,
-        text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        ["networksetup", "-listallhardwareports"], capture_output=True, text=True, **SUBPROCESS_FLAGS
+    ).stdout
+
+    names = {}
+    pending_port = None
+    for line in output.splitlines():
+        port_match = re.match(r"Hardware Port:\s*(.+)$", line)
+        if port_match:
+            pending_port = port_match.group(1).strip()
+            continue
+        device_match = re.match(r"Device:\s*(\S+)$", line)
+        if device_match and pending_port:
+            names[device_match.group(1)] = pending_port
+            pending_port = None
+    return names
+
+
+def get_adapters_mac() -> list:
+    output = subprocess.run(["ifconfig"], capture_output=True, text=True, **SUBPROCESS_FLAGS).stdout
+    hardware_names = _mac_hardware_port_names()
+
+    iface_re = re.compile(r"^(\S+):\s+flags=", re.MULTILINE)
+    headers = list(iface_re.finditer(output))
+
+    adapters = []
+    for i, header in enumerate(headers):
+        device = header.group(1)
+        if device == "lo0":
+            continue
+        start = header.end()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(output)
+        block = output[start:end]
+
+        inet_match = re.search(r"\binet (\d{1,3}(?:\.\d{1,3}){3}) netmask (0x[0-9a-fA-F]+)", block)
+        if not inet_match:
+            continue
+
+        adapters.append({
+            "name": hardware_names.get(device, device),
+            "ip": inet_match.group(1),
+            "mask": _hex_netmask_to_dotted(inet_match.group(2)),
+        })
+
+    return adapters
+
+
+def get_adapters_windows() -> list:
+    output = subprocess.run(
+        ["ipconfig", "/all"], capture_output=True, text=True, **SUBPROCESS_FLAGS
     ).stdout
 
     header_re = re.compile(r"^(\S.*adapter.*):\s*$", re.MULTILINE)
@@ -111,11 +170,24 @@ def get_adapters() -> list:
     return adapters
 
 
+def get_adapters() -> list:
+    return get_adapters_mac() if IS_MAC else get_adapters_windows()
+
+
 ETHERNET_ADAPTER_RE = re.compile(r"^Ethernet adapter Ethernet(\s+\d+)?$")
 WIFI_ADAPTER_RE = re.compile(r"^Wireless LAN adapter Wi-Fi(\s+\d+)?$")
 
 
 def default_adapter_index(adapters: list) -> int:
+    if IS_MAC:
+        for i, adapter in enumerate(adapters):
+            if "Ethernet" in adapter["name"]:
+                return i
+        for i, adapter in enumerate(adapters):
+            if adapter["name"] == "Wi-Fi":
+                return i
+        return 0
+
     for i, adapter in enumerate(adapters):
         if ETHERNET_ADAPTER_RE.match(adapter["name"]):
             return i
@@ -126,12 +198,11 @@ def default_adapter_index(adapters: list) -> int:
 
 
 def ping(ip: str) -> bool:
-    result = subprocess.run(
-        ["ping", "-n", "1", "-w", str(PING_TIMEOUT_MS), ip],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    if IS_MAC:
+        cmd = ["ping", "-c", "1", "-W", str(PING_TIMEOUT_MS), ip]
+    else:
+        cmd = ["ping", "-n", "1", "-w", str(PING_TIMEOUT_MS), ip]
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **SUBPROCESS_FLAGS)
     return result.returncode == 0
 
 
@@ -148,21 +219,25 @@ def sweep_subnet(hosts: list, gui_queue) -> dict:
 
 
 def get_arp_table() -> dict:
-    output = subprocess.run(
-        ["arp", "-a"],
-        capture_output=True,
-        text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    ).stdout
-
-    ip_re = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$")
-    mac_re = re.compile(r"^([0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}$")
+    output = subprocess.run(["arp", "-a"], capture_output=True, text=True, **SUBPROCESS_FLAGS).stdout
 
     mapping = {}
-    for line in output.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and ip_re.match(parts[0]) and mac_re.match(parts[1]):
-            mapping[parts[0]] = normalize_mac(parts[1])
+    if IS_MAC:
+        # e.g. "? (192.168.1.1) at ac:de:48:0:11:22 on en0 ifscope [ethernet]"
+        # (unresolved entries show "(incomplete)" instead of a MAC, which
+        # this pattern simply won't match, same as skipping them).
+        entry_re = re.compile(
+            r"\((\d{1,3}(?:\.\d{1,3}){3})\)\s+at\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})"
+        )
+        for match in entry_re.finditer(output):
+            mapping[match.group(1)] = normalize_mac(match.group(2))
+    else:
+        ip_re = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$")
+        mac_re = re.compile(r"^([0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}$")
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and ip_re.match(parts[0]) and mac_re.match(parts[1]):
+                mapping[parts[0]] = normalize_mac(parts[1])
 
     return mapping
 
