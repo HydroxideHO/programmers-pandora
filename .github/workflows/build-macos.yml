@@ -1,0 +1,70 @@
+name: Build macOS Release
+
+# PyInstaller can't cross-compile, so this has to run on an actual Mac -
+# GitHub's hosted macos-latest runner stands in for one. Manually triggered
+# (not on every push) so a build only happens, and only gets attached to a
+# release, when deliberately asked for.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing GitHub release tag to attach this build to (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Generate .icns from source artwork
+        run: |
+          set -e
+          mkdir -p Logo/pandora.iconset
+          sips -z 16 16     Logo/pandora_1024.png --out Logo/pandora.iconset/icon_16x16.png
+          sips -z 32 32     Logo/pandora_1024.png --out Logo/pandora.iconset/icon_16x16@2x.png
+          sips -z 32 32     Logo/pandora_1024.png --out Logo/pandora.iconset/icon_32x32.png
+          sips -z 64 64     Logo/pandora_1024.png --out Logo/pandora.iconset/icon_32x32@2x.png
+          sips -z 128 128   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_128x128.png
+          sips -z 256 256   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_128x128@2x.png
+          sips -z 256 256   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_256x256.png
+          sips -z 512 512   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_256x256@2x.png
+          sips -z 512 512   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_512x512.png
+          cp Logo/pandora_1024.png Logo/pandora.iconset/icon_512x512@2x.png
+          iconutil -c icns Logo/pandora.iconset -o Logo/pandora.icns
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm --distpath installer/dist --workpath installer/build installer/ProgrammersPandora-mac.spec
+
+      - name: Inspect bundle layout
+        run: |
+          echo "--- Contents/MacOS ---"
+          ls -la "installer/dist/Programmer's Pandora.app/Contents/MacOS"
+          echo "--- Info.plist CFBundleExecutable ---"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "installer/dist/Programmer's Pandora.app/Contents/Info.plist"
+
+      - name: Zip the .app
+        run: |
+          cd installer/dist
+          ditto -c -k --sequesterRsrc --keepParent "Programmer's Pandora.app" ProgrammersPandora-mac.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProgrammersPandora-mac
+          path: installer/dist/ProgrammersPandora-mac.zip
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.release_tag }}" installer/dist/ProgrammersPandora-mac.zip --clobber
