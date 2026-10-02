@@ -2,11 +2,17 @@
 # macOS build: compiles every top-level tool script into its own executable,
 # all sharing one bundle (customtkinter/darkdetect/packaging/the embedded
 # Python runtime are bundled once, not duplicated per script), then wraps
-# the whole thing as "Programmer's Pandora.app". pandora_home.py is listed
-# first so PyInstaller's BUNDLE() picks it as the app's main launchable
-# executable (Contents/MacOS/pandora_home) - the other tools ride along as
-# extra files inside the same bundle, launched as subprocesses by the
+# the whole thing as "Programmer's Pandora.app". The other tools ride along
+# as extra files inside the same bundle, launched as subprocesses by the
 # launcher exactly like the Windows build does.
+#
+# Which one PyInstaller's BUNDLE() picks as the app's actual launch target
+# (Contents/MacOS/<name>, referenced by Info.plist's CFBundleExecutable)
+# isn't documented for a merged multi-exe COLLECT like this one - verified
+# against a real build that it's whichever compiled name sorts
+# alphabetically first, not insertion order and not file size. pandora_home
+# is forced to sort first via EXE_NAME_OVERRIDES below so it's always
+# picked, regardless of what other tool scripts get added later.
 #
 # Must be built ON macOS - PyInstaller does not cross-compile. See
 # .github/workflows/build-macos.yml, which also generates the .icns this
@@ -25,6 +31,10 @@ SCRIPTS = [
     "wifi_monitor.py",
     "wifi_spectrum_view.py",
 ]
+
+EXE_NAME_OVERRIDES = {
+    "pandora_home.py": "_pandora_home",
+}
 
 ICNS_FILE = os.path.join(PROJECT_DIR, "Logo", "pandora.icns")
 
@@ -45,7 +55,7 @@ for script in SCRIPTS:
         a.scripts,
         [],
         exclude_binaries=True,
-        name=os.path.splitext(script)[0],
+        name=EXE_NAME_OVERRIDES.get(script, os.path.splitext(script)[0]),
         console=False,
     )
     built.append((exe, a))
