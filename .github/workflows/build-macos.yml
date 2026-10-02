@@ -28,23 +28,34 @@ jobs:
         run: pip install pyinstaller
 
       - name: Generate .icns from source artwork
+        # Built in a scratch dir outside Logo/ so the intermediate .iconset
+        # (a dozen resized PNGs) doesn't get swept up by the later step that
+        # copies the whole Logo/ folder into the app bundle.
         run: |
           set -e
-          mkdir -p Logo/pandora.iconset
-          sips -z 16 16     Logo/pandora_1024.png --out Logo/pandora.iconset/icon_16x16.png
-          sips -z 32 32     Logo/pandora_1024.png --out Logo/pandora.iconset/icon_16x16@2x.png
-          sips -z 32 32     Logo/pandora_1024.png --out Logo/pandora.iconset/icon_32x32.png
-          sips -z 64 64     Logo/pandora_1024.png --out Logo/pandora.iconset/icon_32x32@2x.png
-          sips -z 128 128   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_128x128.png
-          sips -z 256 256   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_128x128@2x.png
-          sips -z 256 256   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_256x256.png
-          sips -z 512 512   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_256x256@2x.png
-          sips -z 512 512   Logo/pandora_1024.png --out Logo/pandora.iconset/icon_512x512.png
-          cp Logo/pandora_1024.png Logo/pandora.iconset/icon_512x512@2x.png
-          iconutil -c icns Logo/pandora.iconset -o Logo/pandora.icns
+          mkdir -p /tmp/pandora.iconset
+          sips -z 16 16     Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_16x16.png
+          sips -z 32 32     Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_16x16@2x.png
+          sips -z 32 32     Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_32x32.png
+          sips -z 64 64     Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_32x32@2x.png
+          sips -z 128 128   Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_128x128.png
+          sips -z 256 256   Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_128x128@2x.png
+          sips -z 256 256   Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_256x256.png
+          sips -z 512 512   Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_256x256@2x.png
+          sips -z 512 512   Logo/pandora_1024.png --out /tmp/pandora.iconset/icon_512x512.png
+          cp Logo/pandora_1024.png /tmp/pandora.iconset/icon_512x512@2x.png
+          iconutil -c icns /tmp/pandora.iconset -o Logo/pandora.icns
 
       - name: Build with PyInstaller
         run: pyinstaller --noconfirm --distpath installer/dist --workpath installer/build installer/ProgrammersPandora-mac.spec
+
+      - name: Copy Logo/ next to the executables
+        # BUNDLE() relocates everything passed as `datas` in the spec to
+        # Contents/Resources/, but pandora_theme.py looks for Logo/ right
+        # next to sys.executable (Contents/MacOS/, same convention as the
+        # Windows build) - simplest fix is copying it there directly rather
+        # than teaching the app's path logic about Resources/ just for this.
+        run: cp -r Logo "installer/dist/Programmer's Pandora.app/Contents/MacOS/Logo"
 
       - name: Inspect bundle layout
         run: |
