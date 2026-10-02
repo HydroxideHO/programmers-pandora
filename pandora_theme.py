@@ -44,16 +44,15 @@ IS_MAC = sys.platform == "darwin"
 SUBPROCESS_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
 
 # When frozen by PyInstaller, __file__ points inside the temp/bundle extraction
-# dir, not next to the compiled .exe/.app - use sys.executable's folder instead
-# so Logo/, theme_pref.json, etc. resolve to files actually shipped alongside
-# it. On macOS a frozen .app's executable lives in Contents/MacOS/, two levels
-# below Contents/Resources/ where PyInstaller puts bundled data by default -
-# app-relative files are shipped there instead (see the .spec on macOS builds).
+# dir, not next to the compiled .exe - use sys.executable's folder instead so
+# Logo/, theme_pref.json, etc. resolve to files actually shipped alongside it.
+# This holds on macOS too: PyInstaller's BUNDLE() places the whole onedir
+# payload (every compiled tool plus any extra `datas`) under
+# <App>.app/Contents/MacOS/ right next to the executable, not under
+# Contents/Resources/ (that's reserved for the .icns PyInstaller manages via
+# the spec's own icon= setting) - so no extra path segment is needed here.
 if getattr(sys, "frozen", False):
-    if IS_MAC:
-        APP_DIR = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "Resources"))
-    else:
-        APP_DIR = os.path.dirname(sys.executable)
+    APP_DIR = os.path.dirname(sys.executable)
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
