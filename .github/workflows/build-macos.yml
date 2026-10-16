@@ -3,13 +3,15 @@ name: Build macOS Release
 # PyInstaller can't cross-compile, so this has to run on an actual Mac -
 # GitHub's hosted macos-latest runner stands in for one. Manually triggered
 # (not on every push) so a build only happens, and only gets attached to a
-# release, when deliberately asked for.
+# release, when deliberately asked for. Smoke tests run before the release
+# step, so a build that crashes on launch never gets attached.
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing GitHub release tag to attach this build to (e.g. v1.0.0)"
-        required: true
+        description: "Existing release tag to attach this build to (e.g. v1.0.0) - leave blank to just build and smoke-test"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -64,6 +66,19 @@ jobs:
           echo "--- Info.plist CFBundleExecutable ---"
           /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "installer/dist/Programmer's Pandora.app/Contents/Info.plist"
 
+      - name: Smoke test - source-level macOS code paths
+        run: python .github/scripts/macos_source_checks.py
+
+      - name: Smoke test - launch and screenshot each tool
+        run: bash .github/scripts/macos_app_smoke_test.sh
+
+      - name: Upload smoke test screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-smoke-test
+          path: smoke/
+
       - name: Zip the .app
         run: |
           cd installer/dist
@@ -76,6 +91,7 @@ jobs:
           path: installer/dist/ProgrammersPandora-mac.zip
 
       - name: Attach to release
+        if: inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ inputs.release_tag }}" installer/dist/ProgrammersPandora-mac.zip --clobber
