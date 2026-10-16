@@ -15,12 +15,28 @@ mkdir -p "$OUT"
 status=0
 
 echo "--- code signature ---"
+# Anything modifying the bundle after PyInstaller signs it breaks the seal,
+# and macOS then reports a downloaded copy as "damaged" - so this is fatal.
 if codesign --verify --deep --strict --verbose=2 "$APP" > "$OUT/codesign.txt" 2>&1; then
     echo "PASS  bundle signature valid"
 else
-    echo "WARN  bundle signature invalid (Gatekeeper may report the app as damaged):"
-    cat "$OUT/codesign.txt"
+    echo "FAIL  bundle signature invalid:"
+    tail -20 "$OUT/codesign.txt"
+    status=1
 fi
+
+echo "--- bundled resources ---"
+# The launcher lists tools by reading these .py files - without them it
+# shows "No scripts found" even though every tool binary is present.
+RESOURCES="$APP/Contents/Resources"
+for required in Logo/pandora_512.png androidtv_pubkey.py ip_monitor.py mac_monitor.py network_scanner.py wifi_monitor.py wifi_spectrum_view.py; do
+    if [ -f "$RESOURCES/$required" ]; then
+        echo "PASS  Resources/$required present"
+    else
+        echo "FAIL  Resources/$required missing"
+        status=1
+    fi
+done
 
 for tool in $TOOLS; do
     "$MACOS_DIR/$tool" > "$OUT/$tool.log" 2>&1 &

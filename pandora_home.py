@@ -27,7 +27,8 @@ from tkinter import messagebox
 import pandora_theme
 from pandora_theme import ctk, font, set_window_icon, SUBPROCESS_FLAGS
 
-ROOT_DIR = pandora_theme.APP_DIR
+ROOT_DIR = pandora_theme.APP_DIR  # compiled executables (and the working dir tools launch in)
+SOURCE_DIR = pandora_theme.RESOURCE_DIR  # the .py files titles/descriptions are read from
 FROZEN = getattr(sys, "frozen", False)
 FROZEN_EXE_SUFFIX = ".exe" if pandora_theme.IS_WINDOWS else ""
 EXCLUDED_FILES = {"pandora_theme.py", "pandora_home.py"}
@@ -92,8 +93,8 @@ def parse_script_info(path: str):
 
 def discover_scripts():
     scripts = []
-    for entry in sorted(os.listdir(ROOT_DIR)):
-        path = os.path.join(ROOT_DIR, entry)
+    for entry in sorted(os.listdir(SOURCE_DIR)):
+        path = os.path.join(SOURCE_DIR, entry)
         if not entry.endswith(".py") or entry in EXCLUDED_FILES or not os.path.isfile(path):
             continue
 

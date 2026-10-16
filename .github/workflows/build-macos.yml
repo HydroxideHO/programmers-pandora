@@ -31,8 +31,8 @@ jobs:
 
       - name: Generate .icns from source artwork
         # Built in a scratch dir outside Logo/ so the intermediate .iconset
-        # (a dozen resized PNGs) doesn't get swept up by the later step that
-        # copies the whole Logo/ folder into the app bundle.
+        # (a dozen resized PNGs) doesn't get bundled along with the rest of
+        # Logo/, which the spec packs into the app as data.
         run: |
           set -e
           mkdir -p /tmp/pandora.iconset
@@ -50,14 +50,6 @@ jobs:
 
       - name: Build with PyInstaller
         run: pyinstaller --noconfirm --distpath installer/dist --workpath installer/build installer/ProgrammersPandora-mac.spec
-
-      - name: Copy Logo/ next to the executables
-        # BUNDLE() relocates everything passed as `datas` in the spec to
-        # Contents/Resources/, but pandora_theme.py looks for Logo/ right
-        # next to sys.executable (Contents/MacOS/, same convention as the
-        # Windows build) - simplest fix is copying it there directly rather
-        # than teaching the app's path logic about Resources/ just for this.
-        run: cp -r Logo "installer/dist/Programmer's Pandora.app/Contents/MacOS/Logo"
 
       - name: Inspect bundle layout
         run: |

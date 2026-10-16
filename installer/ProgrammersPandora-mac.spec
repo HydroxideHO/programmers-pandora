@@ -38,9 +38,14 @@ EXE_NAME_OVERRIDES = {
 
 ICNS_FILE = os.path.join(PROJECT_DIR, "Logo", "pandora.icns")
 
+# Logo/ and the tool .py sources (the launcher reads each tool's title and
+# description from them) are bundled here rather than copied in afterward,
+# so they get code signed with everything else - BUNDLE() places them under
+# Contents/Resources/, which pandora_theme.RESOURCE_DIR points at.
 COMMON_DATAS = [
     (os.path.join(PROJECT_DIR, "vendor", "customtkinter", "assets"), "customtkinter/assets"),
-]
+    (os.path.join(PROJECT_DIR, "Logo"), "Logo"),
+] + [(os.path.join(PROJECT_DIR, script), ".") for script in SCRIPTS]
 
 built = []
 for script in SCRIPTS:

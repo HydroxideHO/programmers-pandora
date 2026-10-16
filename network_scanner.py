@@ -49,7 +49,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from pandora_theme import ctk, palette, font, FONT_FAMILY, set_window_icon, APP_DIR, IS_MAC, SUBPROCESS_FLAGS
+from pandora_theme import ctk, palette, font, FONT_FAMILY, set_window_icon, STATE_DIR, IS_MAC, SUBPROCESS_FLAGS
 
 PING_TIMEOUT_MS = 300
 MAX_WORKERS = 100
@@ -58,7 +58,7 @@ VENDOR_API_URL = "https://api.macvendors.com/{}"
 VENDOR_API_TIMEOUT = 2
 VENDOR_REQUEST_DELAY = 1.1  # stay under the free API's ~1 req/sec rate limit
 VENDOR_RATE_LIMIT_RETRY_DELAY = 2.0
-VENDOR_CACHE_FILE = os.path.join(APP_DIR, "vendor_cache.json")
+VENDOR_CACHE_FILE = os.path.join(STATE_DIR, "vendor_cache.json")
 WEB_PORTS = (80, 443, 8080, 8443)
 WEB_CHECK_TIMEOUT = 0.5
 

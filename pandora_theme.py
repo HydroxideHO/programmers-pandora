@@ -43,18 +43,34 @@ IS_MAC = sys.platform == "darwin"
 #     subprocess.run([...], **SUBPROCESS_FLAGS)
 SUBPROCESS_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
 
-# When frozen by PyInstaller, __file__ points inside the temp/bundle extraction
-# dir, not next to the compiled .exe - use sys.executable's folder instead so
-# Logo/, theme_pref.json, etc. resolve to files actually shipped alongside it.
-# This holds on macOS too: PyInstaller's BUNDLE() places the whole onedir
-# payload (every compiled tool plus any extra `datas`) under
-# <App>.app/Contents/MacOS/ right next to the executable, not under
-# Contents/Resources/ (that's reserved for the .icns PyInstaller manages via
-# the spec's own icon= setting) - so no extra path segment is needed here.
-if getattr(sys, "frozen", False):
+# Three directories, which only differ in a frozen macOS .app:
+#   APP_DIR      - where the compiled executables live (the launcher starts
+#                  sibling tools from here).
+#   RESOURCE_DIR - where bundled read-only files live (Logo/, the tool .py
+#                  sources the launcher reads titles from).
+#   STATE_DIR    - where runtime-written files go (theme_pref.json,
+#                  vendor_cache.json).
+# In a frozen .app, PyInstaller puts executables in Contents/MacOS/ but moves
+# every spec `datas` file to Contents/Resources/. The bundle is also code
+# signed, so writing into it at runtime would break its signature (and
+# fails outright when macOS runs a downloaded app from a read-only
+# translocated copy) - state goes to ~/Library/Application Support instead.
+# On Windows and when running from source, all three are the same folder.
+# (When frozen, __file__ points inside PyInstaller's extraction dir, not next
+# to the executable, hence sys.executable.)
+_FROZEN = getattr(sys, "frozen", False)
+if _FROZEN:
     APP_DIR = os.path.dirname(sys.executable)
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if _FROZEN and IS_MAC:
+    RESOURCE_DIR = os.path.abspath(os.path.join(APP_DIR, "..", "Resources"))
+    STATE_DIR = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Programmer's Pandora")
+    os.makedirs(STATE_DIR, exist_ok=True)
+else:
+    RESOURCE_DIR = APP_DIR
+    STATE_DIR = APP_DIR
 
 VENDOR_DIR = os.path.join(APP_DIR, "vendor")
 if os.path.isdir(VENDOR_DIR) and VENDOR_DIR not in sys.path:
@@ -62,9 +78,9 @@ if os.path.isdir(VENDOR_DIR) and VENDOR_DIR not in sys.path:
 
 import customtkinter as ctk  # noqa: E402  (must follow the sys.path insert)
 
-ICON_ICO_PATH = os.path.join(APP_DIR, "Logo", "pandora.ico")
-ICON_PNG_PATH = os.path.join(APP_DIR, "Logo", "pandora_512.png")
-THEME_PREF_FILE = os.path.join(APP_DIR, "theme_pref.json")
+ICON_ICO_PATH = os.path.join(RESOURCE_DIR, "Logo", "pandora.ico")
+ICON_PNG_PATH = os.path.join(RESOURCE_DIR, "Logo", "pandora_512.png")
+THEME_PREF_FILE = os.path.join(STATE_DIR, "theme_pref.json")
 
 
 def set_window_icon(window):
