@@ -84,7 +84,7 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "Programmer's Pandora",
         "CFBundleDisplayName": "Programmer's Pandora",
-        "CFBundleShortVersionString": "1.1.0",
+        "CFBundleShortVersionString": "1.2.0",
         "NSHighResolutionCapable": True,
         "NSHumanReadableCopyright": "MIT License",
     },
