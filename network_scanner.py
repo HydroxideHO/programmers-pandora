@@ -27,21 +27,29 @@ How it works:
   ones that look like they're hosting a web page (e.g. router/printer/
   camera admin UIs). Check "Only show devices with a web page" to filter
   the results down to just those.
+- For each device with a web server, reads the page's <title> (from the
+  same URL double-clicking the row opens) into the Web Page column, so you
+  can see what you're about to open. Certificate checks are skipped since
+  device admin pages are almost always self-signed.
 
 Uses the vendored customtkinter package in vendor/ for its UI, plus the
 rest of the Python standard library. Works on Windows and macOS.
 """
 
+import html
+import http.client
 import ipaddress
 import json
 import os
 import queue
 import re
 import socket
+import ssl
 import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 
@@ -267,6 +275,90 @@ def check_port_open(ip: str, port: int) -> bool:
         return False
 
 
+TITLE_FETCH_TIMEOUT = 4
+TITLE_MAX_BYTES = 65536  # <title> is in <head>; no need to download whole pages
+TITLE_MAX_LENGTH = 80
+TITLE_MAX_REDIRECT_HOPS = 2
+TITLE_UNREADABLE = "(couldn't read page)"
+TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+META_CHARSET_RE = re.compile(rb"""<meta[^>]+charset=["']?([\w-]+)""", re.IGNORECASE)
+# Device UIs often land on a stub page that just forwards to the real one,
+# either with <meta http-equiv="refresh"> or a one-line script.
+REDIRECT_RES = [
+    re.compile(r"""<meta[^>]+http-equiv=["']?refresh["']?[^>]+url=["']?([^"'>\s]+)""", re.IGNORECASE),
+    re.compile(r"""(?:window\.|document\.|top\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']"""),
+    re.compile(r"""location\.(?:replace|assign)\(\s*["']([^"']+)["']"""),
+]
+
+
+def _title_tls_context() -> ssl.SSLContext:
+    # Device admin pages are almost always self-signed, and older devices
+    # use ciphers/key sizes modern defaults reject - but this only reads a
+    # page title and sends nothing, so accept whatever they offer.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+    try:
+        context.set_ciphers("DEFAULT:@SECLEVEL=0")
+        context.minimum_version = ssl.TLSVersion.TLSv1
+    except (ssl.SSLError, ValueError):
+        pass
+    return context
+
+
+def _decode_page(body: bytes, header_charset) -> str:
+    meta_match = META_CHARSET_RE.search(body)
+    candidates = [header_charset, meta_match.group(1).decode("ascii") if meta_match else None, "utf-8"]
+    for charset in candidates:
+        if not charset:
+            continue
+        try:
+            return body.decode(charset)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return body.decode("cp1252", errors="replace")  # undeclared legacy pages are usually Windows-1252
+
+
+def _read_page(url: str, context: ssl.SSLContext):
+    """Returns (status, final_url, text). Error statuses are returned, not
+    raised, since login/error pages still often have a useful title."""
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Programmer's Pandora)"})
+    try:
+        resp = urllib.request.urlopen(request, timeout=TITLE_FETCH_TIMEOUT, context=context)
+    except urllib.error.HTTPError as exc:
+        resp = exc
+    with resp:
+        status = getattr(resp, "status", None) or resp.code
+        try:
+            body = resp.read(TITLE_MAX_BYTES)
+        except http.client.IncompleteRead as exc:  # device closed the connection early
+            body = exc.partial
+        return status, resp.url, _decode_page(body, resp.headers.get_content_charset())
+
+
+def fetch_page_title(url: str) -> str:
+    """Returns the page's <title>; "" if it has none; "(no title, HTTP n)"
+    for an untitled error page; TITLE_UNREADABLE if it couldn't be fetched."""
+    context = _title_tls_context()
+    status = None
+    try:
+        for _ in range(TITLE_MAX_REDIRECT_HOPS + 1):
+            status, final_url, text = _read_page(url, context)
+            match = TITLE_RE.search(text)
+            title = " ".join(html.unescape(match.group(1)).split()) if match else ""
+            if title:
+                return title[:TITLE_MAX_LENGTH]
+            target = next((m.group(1) for regex in REDIRECT_RES if (m := regex.search(text))), None)
+            if not target:
+                break
+            url = urllib.parse.urljoin(final_url, html.unescape(target))
+    except (OSError, ValueError, http.client.HTTPException):
+        return TITLE_UNREADABLE
+
+    return f"(no title, HTTP {status})" if status and status >= 400 else ""
+
+
 def resolve_web_servers(ips: list, gui_queue) -> None:
     pending_ports = {ip: set(WEB_PORTS) for ip in ips}
     open_ports = {ip: [] for ip in ips}
@@ -285,6 +377,15 @@ def resolve_web_servers(ips: list, gui_queue) -> None:
                 devices_done += 1
                 gui_queue.put(("field", (ip, "web", sorted(open_ports[ip]))))
                 gui_queue.put(("progress", ("Checking for web servers", devices_done, total)))
+
+    # Read each detected page's <title> from the same URL double-clicking
+    # the row opens, so the table shows what that click leads to.
+    urls = {ip: build_web_url(ip, ports) for ip, ports in open_ports.items() if ports}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(fetch_page_title, url): ip for ip, url in urls.items()}
+        for completed, future in enumerate(as_completed(futures), start=1):
+            gui_queue.put(("field", (futures[future], "title", future.result())))
+            gui_queue.put(("progress", ("Reading web page titles", completed, len(urls))))
 
 
 def build_web_url(ip: str, ports: list):
@@ -420,6 +521,7 @@ COLUMN_LABELS = {
     "hostname": "Hostname",
     "vendor": "Manufacturer",
     "web": "Web Server",
+    "page": "Web Page",
 }
 
 SORT_KEYS = {
@@ -428,6 +530,8 @@ SORT_KEYS = {
     "hostname": lambda ip, device: (device["hostname"] or "").lower(),
     "vendor": lambda ip, device: (device["vendor"] or "").lower(),
     "web": lambda ip, device: tuple(device["web"]),
+    # Real titles first; "(no title)"-style placeholders and unread pages after.
+    "page": lambda ip, device: (not device["title"] or device["title"].startswith("("), (device["title"] or "").lower()),
 }
 
 
@@ -553,7 +657,7 @@ class NetworkScannerApp:
         tree_style = configure_treeview_style()
         self.tree = ttk.Treeview(
             table_frame,
-            columns=("ip", "mac", "hostname", "vendor", "web"),
+            columns=tuple(COLUMN_LABELS),
             show="headings",
             style=tree_style,
         )
@@ -561,9 +665,10 @@ class NetworkScannerApp:
             self.tree.heading(col, text=COLUMN_LABELS[col], command=lambda c=col: self.sort_by(c))
         self.tree.column("ip", width=130)
         self.tree.column("mac", width=140)
-        self.tree.column("hostname", width=200)
-        self.tree.column("vendor", width=180)
-        self.tree.column("web", width=100)
+        self.tree.column("hostname", width=170)
+        self.tree.column("vendor", width=160)
+        self.tree.column("web", width=90)
+        self.tree.column("page", width=200)
 
         scrollbar = ttk.Scrollbar(
             table_frame, orient="vertical", command=self.tree.yview, style="Pandora.Vertical.TScrollbar"
@@ -605,16 +710,25 @@ class NetworkScannerApp:
         if not term:
             return True
         haystack = " ".join(
-            str(v) for v in (ip, device["mac"], device["hostname"], device["vendor"], self.format_web(ip))
+            str(v) for v in (
+                ip, device["mac"], device["hostname"], device["vendor"], self.format_web(ip), self.format_page(ip)
+            )
         ).lower()
         return term in haystack
 
     def format_web(self, ip: str) -> str:
         return ", ".join(str(p) for p in self.devices[ip]["web"])
 
+    def format_page(self, ip: str) -> str:
+        # None = not read yet (blank); "" = read, but the page has no title.
+        title = self.devices[ip]["title"]
+        return "(no title)" if title == "" else (title or "")
+
     def refresh_row(self, ip: str):
         device = self.devices[ip]
-        values = (ip, device["mac"], device["hostname"], device["vendor"], self.format_web(ip))
+        values = (
+            ip, device["mac"], device["hostname"], device["vendor"], self.format_web(ip), self.format_page(ip)
+        )
         item_id = self.tree_items.get(ip)
 
         if self.passes_filter(ip):
@@ -769,7 +883,7 @@ class NetworkScannerApp:
                     self.status_var.set(payload)
                 elif kind == "devices":
                     for ip, mac in payload:
-                        self.devices[ip] = {"mac": mac, "hostname": "", "vendor": "", "web": []}
+                        self.devices[ip] = {"mac": mac, "hostname": "", "vendor": "", "web": [], "title": None}
                         self.refresh_row(ip)
                 elif kind == "field":
                     ip, field, value = payload
