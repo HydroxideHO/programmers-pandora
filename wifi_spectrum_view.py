@@ -12,13 +12,14 @@ How it works:
   since background scanning is heavily throttled. Then runs
   `netsh wlan show networks mode=bssid` and parses every visible
   SSID/BSSID's channel and signal strength.
-- macOS: runs the `airport` command-line tool's `-s` scan. This is an
-  undocumented tool Apple ships inside a private framework rather than a
-  supported public API, so it isn't guaranteed to exist or keep working on
-  any given macOS version - if it's missing, this tool says so rather than
-  pretending to have data. Unlike netsh, each `airport -s` call already
-  performs a fresh over-the-air scan itself, so there's no separate
-  "trigger a rescan" step needed the way Windows requires.
+- macOS: uses the `airport` command-line tool's `-s` scan where it still
+  exists - an undocumented private-framework tool that does a fresh
+  over-the-air scan each call. Recent macOS has removed it, so otherwise
+  falls back to the "Other Local Wi-Fi Networks" section of
+  `system_profiler SPAirPortDataType`, which is slower and reflects
+  macOS's most recent scan rather than forcing a new one. Newer macOS may
+  also redact network names there; channel and signal still come through,
+  which is all the chart needs.
 - Plots each network as a bump centered on its channel's center frequency,
   height set by signal percentage, alongside light gridlines marking every
   standard 2.4 GHz or 5 GHz WiFi channel.
@@ -227,14 +228,7 @@ def scan_networks_windows() -> list:
 AIRPORT_PATH = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 
 
-def scan_networks_mac() -> list:
-    if not os.path.isfile(AIRPORT_PATH):
-        raise RuntimeError(
-            "WiFi neighbor scanning isn't available on this Mac: the private 'airport' "
-            "utility this relies on wasn't found at its usual path. Recent macOS versions "
-            "have been known to move or remove it."
-        )
-
+def scan_networks_airport() -> list:
     output = subprocess.run(
         [AIRPORT_PATH, "-s"], capture_output=True, text=True, timeout=15, **SUBPROCESS_FLAGS
     ).stdout
@@ -267,6 +261,85 @@ def scan_networks_mac() -> list:
         })
 
     return results
+
+
+PROFILER_NETWORK_SECTIONS = ("Current Network Information:", "Other Local Wi-Fi Networks:")
+
+
+def parse_profiler_networks(output: str) -> list:
+    """Pulls every network out of `system_profiler SPAirPortDataType`'s
+    "Current Network Information" and "Other Local Wi-Fi Networks" sections.
+    Each section holds one "<name>:" line per network, with that network's
+    "Key: value" fields indented one level deeper."""
+    def indent_of(text):
+        return len(text) - len(text.lstrip())
+
+    lines = output.splitlines()
+    found = []
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() not in PROFILER_NETWORK_SECTIONS:
+            i += 1
+            continue
+
+        section_indent = indent_of(lines[i])
+        name_indent = None
+        current = None
+        i += 1
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip():
+                i += 1
+                continue
+            if indent_of(line) <= section_indent:
+                break  # next section (re-checked by the outer loop)
+            if name_indent is None:
+                name_indent = indent_of(line)
+            if indent_of(line) == name_indent:
+                current = {"name": line.strip().rstrip(":"), "fields": {}}
+                found.append(current)
+            elif current is not None:
+                key, _, value = line.strip().partition(":")
+                current["fields"][key.strip()] = value.strip()
+            i += 1
+
+    results = []
+    for index, network in enumerate(found):
+        channel_match = re.match(r"(\d+)", network["fields"].get("Channel", ""))
+        signal_match = re.match(r"(-?\d+)\s*dBm", network["fields"].get("Signal / Noise", ""))
+        if not (channel_match and signal_match):
+            continue
+        results.append({
+            "ssid": network["name"] or "(hidden)",
+            # system_profiler doesn't report BSSIDs; this field only feeds
+            # each network's chart color, so a per-entry key keeps colors
+            # distinct even when macOS redacts several network names.
+            "bssid": f"#{index}",
+            "signal": dbm_to_signal_percent(int(signal_match.group(1))),
+            "radio": network["fields"].get("PHY Mode") or None,
+            "channel": int(channel_match.group(1)),
+        })
+    return results
+
+
+def scan_networks_profiler() -> list:
+    output = subprocess.run(
+        ["system_profiler", "SPAirPortDataType"], capture_output=True, text=True, timeout=30, **SUBPROCESS_FLAGS
+    ).stdout
+    if not re.search(r"^\s*Status:", output, re.MULTILINE):
+        raise RuntimeError("No Wi-Fi interface found on this Mac.")
+    return parse_profiler_networks(output)
+
+
+def scan_networks_mac() -> list:
+    # airport gives a fresh scan but is gone from (or stubbed out on) recent
+    # macOS; system_profiler is slower and reports macOS's most recent scan
+    # rather than forcing a new one, but is still there.
+    if os.path.isfile(AIRPORT_PATH):
+        networks = scan_networks_airport()
+        if networks:
+            return networks
+    return scan_networks_profiler()
 
 
 def scan_networks() -> list:
