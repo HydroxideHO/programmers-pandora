@@ -12,8 +12,9 @@ vendor path is guaranteed to be set up first:
     from pandora_theme import ctk, palette, font, set_window_icon
 
 Call `set_window_icon(root)` right after creating each script's root window
-to pick up the app icon - Logo/pandora.ico on Windows, Logo/pandora_512.png
-on macOS (Tk's .ico support is Windows-only).
+to pick up that tool's own icon from Logo/tools/ (falling back to the main
+Pandora icon) - .ico on Windows, .png on macOS (Tk's .ico support is
+Windows-only). On Windows it also gives each tool its own taskbar button.
 
 Also exposes IS_WINDOWS/IS_MAC and SUBPROCESS_FLAGS (spread into any
 subprocess.run()/Popen() call that shells out to things like ping/arp/netsh,
@@ -83,21 +84,47 @@ ICON_PNG_PATH = os.path.join(RESOURCE_DIR, "Logo", "pandora_512.png")
 THEME_PREF_FILE = os.path.join(STATE_DIR, "theme_pref.json")
 
 
-def set_window_icon(window):
+def current_tool() -> str:
+    """The running tool's name, from its script or compiled executable name
+    (e.g. "network_scanner"). The macOS build names the launcher
+    "_pandora_home" so it sorts first in the bundle - hence the lstrip."""
+    return os.path.splitext(os.path.basename(sys.argv[0]))[0].lstrip("_")
+
+
+def _tool_icon(tool: str, extension: str, fallback: str) -> str:
+    path = os.path.join(RESOURCE_DIR, "Logo", "tools", f"{tool}.{extension}")
+    return path if os.path.isfile(path) else fallback
+
+
+def set_window_icon(window, tool: str = None):
+    """Applies the tool's own icon (Logo/tools/<tool>.*), falling back to the
+    main Pandora icon - the launcher has no per-tool icon, so it gets that."""
+    tool = tool or current_tool()
+
     # Tk's iconbitmap() only understands .ico on Windows (and is a no-op/
     # error on macOS, which wants a real image via iconphoto() instead).
     if IS_WINDOWS:
-        if os.path.isfile(ICON_ICO_PATH):
+        # Without its own AppUserModelID, Windows groups taskbar buttons by
+        # executable - and from source every tool is python.exe, so they'd
+        # all stack under one Python icon instead of showing their own.
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"HydroxideHO.ProgrammersPandora.{tool}")
+        except (AttributeError, OSError):
+            pass
+        icon_path = _tool_icon(tool, "ico", ICON_ICO_PATH)
+        if os.path.isfile(icon_path):
             try:
-                window.iconbitmap(ICON_ICO_PATH)
+                window.iconbitmap(icon_path)
             except tk.TclError:
                 pass
         return
 
-    if os.path.isfile(ICON_PNG_PATH):
+    icon_path = _tool_icon(tool, "png", ICON_PNG_PATH)
+    if os.path.isfile(icon_path):
         try:
-            photo = tk.PhotoImage(file=ICON_PNG_PATH)
-            window.iconphoto(True, photo)
+            photo = tk.PhotoImage(file=icon_path)
+            window.iconphoto(True, photo)  # on macOS this sets the Dock icon too
             window._icon_photo_ref = photo  # keep a reference - Tk drops the icon if this is garbage collected
         except tk.TclError:
             pass

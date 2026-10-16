@@ -21,6 +21,13 @@ SCRIPTS = [
 
 ICON_FILE = os.path.join(PROJECT_DIR, "Logo", "pandora.ico")
 
+
+def icon_for(script):
+    # Each tool's own icon (installer/make_tool_icons.py); the launcher has
+    # none and keeps the main Pandora icon.
+    tool_icon = os.path.join(PROJECT_DIR, "Logo", "tools", os.path.splitext(script)[0] + ".ico")
+    return tool_icon if os.path.isfile(tool_icon) else ICON_FILE
+
 COMMON_DATAS = [
     (os.path.join(PROJECT_DIR, "vendor", "customtkinter", "assets"), "customtkinter/assets"),
 ]
@@ -40,7 +47,7 @@ for script in SCRIPTS:
         exclude_binaries=True,
         name=os.path.splitext(script)[0],
         console=False,
-        icon=ICON_FILE,
+        icon=icon_for(script),
     )
     built.append((exe, a))
 

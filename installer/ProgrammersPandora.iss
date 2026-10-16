@@ -30,9 +30,12 @@ Source: "installer\dist\ProgrammersPandora\*"; DestDir: "{app}"; Flags: ignoreve
 ; tool's docstring for its title/description - see discover_scripts() in
 ; pandora_home.py. They're not executed directly; the .exe above is.
 Source: "*.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "Logo\*"; DestDir: "{app}\Logo"; Flags: ignoreversion
+Source: "Logo\*"; DestDir: "{app}\Logo"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; WorkingDir: "{app}"; IconFilename: "{app}\Logo\pandora.ico"
+; AppUserModelID must match what pandora_theme.set_window_icon() sets for the
+; running launcher, or a pinned taskbar shortcut and its open window show up
+; as two separate taskbar buttons.
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; WorkingDir: "{app}"; IconFilename: "{app}\Logo\pandora.ico"; AppUserModelID: "HydroxideHO.ProgrammersPandora.pandora_home"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\Logo\pandora.ico"
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\Logo\pandora.ico"; AppUserModelID: "HydroxideHO.ProgrammersPandora.pandora_home"
