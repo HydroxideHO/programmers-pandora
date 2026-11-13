@@ -182,6 +182,23 @@ def get_adapters() -> list:
     return get_adapters_mac() if IS_MAC else get_adapters_windows()
 
 
+def unscannable_reason(adapter: dict):
+    """Why scanning this adapter's network could never find anything, or
+    None if it's a real network worth offering."""
+    ip = ipaddress.ip_address(adapter["ip"])
+    network = ipaddress.ip_network(f"{adapter['ip']}/{adapter['mask']}", strict=False)
+    if ip.is_link_local:
+        # Windows makes up a 169.254 address when no router hands one out -
+        # e.g. Tailscale while it's disconnected, or Npcap's loopback adapter.
+        return "no network"
+    if ip.is_loopback:
+        return "loopback"
+    if network.prefixlen >= 31:
+        # e.g. Tailscale while connected (a lone 100.x.x.x/32) or other VPNs.
+        return "single-address link"
+    return None
+
+
 ETHERNET_ADAPTER_RE = re.compile(r"^Ethernet adapter Ethernet(\s+\d+)?$")
 WIFI_ADAPTER_RE = re.compile(r"^Wireless LAN adapter Wi-Fi(\s+\d+)?$")
 
@@ -684,21 +701,34 @@ class NetworkScannerApp:
         self.refresh_adapters()
 
     def refresh_adapters(self):
-        self.adapters = get_adapters()
+        all_adapters = get_adapters()
+        self.adapters = [a for a in all_adapters if not unscannable_reason(a)]
+        hidden = [f"{a['name']} ({unscannable_reason(a)})" for a in all_adapters if unscannable_reason(a)]
+
         self.adapter_labels = [f"{a['name']}  ({a['ip']})" for a in self.adapters]
         self.adapter_combo.configure(values=self.adapter_labels)
+        self.status_var.set("Hid adapters with nothing to scan: " + ", ".join(hidden) if hidden else "Idle")
         if self.adapter_labels:
             index = default_adapter_index(self.adapters)
             self.adapter_combo.set(self.adapter_labels[index])
-            self.on_adapter_selected(self.adapter_labels[index])
+            self.on_adapter_selected(self.adapter_labels[index])  # may replace the status with a subnet note
         else:
-            self.status_var.set("No active adapters found.")
+            self.adapter_combo.set("")
+            self.status_var.set("No adapters with a network to scan - type a subnet below instead.")
 
     def on_adapter_selected(self, label: str):
         if label not in self.adapter_labels:
             return
         adapter = self.adapters[self.adapter_labels.index(label)]
         network = ipaddress.ip_network(f"{adapter['ip']}/{adapter['mask']}", strict=False)
+        if network.num_addresses - 2 > MAX_HOSTS:
+            # Too big to scan whole - start with the /24 this PC is in.
+            full = network
+            network = ipaddress.ip_network(f"{adapter['ip']}/24", strict=False)
+            self.status_var.set(
+                f"{full} is too large to scan at once ({full.num_addresses - 2} addresses) - "
+                f"filled in {network}, the part this PC is on. Edit it to scan elsewhere."
+            )
         self.subnet_entry.delete(0, tk.END)
         self.subnet_entry.insert(0, str(network))
 
@@ -828,12 +858,17 @@ class NetworkScannerApp:
 
         hosts = [str(ip) for ip in network.hosts()]
         if len(hosts) > MAX_HOSTS:
+            link_local_note = (
+                "\n\n169.254.x.x is a self-assigned range: it usually means an adapter isn't "
+                "connected to a real network (Tailscale uses one while it's disconnected)."
+                if network.is_link_local else ""
+            )
             messagebox.showerror(
                 "Subnet too large",
                 f"{cidr} has {len(hosts)} addresses to ping, which would take a while. "
                 f"Any CIDR size works here (/16, /22, /28, ...) as long as it's {MAX_HOSTS} "
                 "hosts or fewer - e.g. a /22 or smaller, or split a larger range into a few "
-                "smaller scans.",
+                "smaller scans." + link_local_note,
             )
             return
 
